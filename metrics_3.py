@@ -1,8 +1,7 @@
 import numpy as np
-from sklearn.cross_decomposition import CCA
-from sklearn.metrics import precision_score
-from sklearn.metrics import confusion_matrix
+import matplotlib.pyplot as plt
 import cv2
+import SimpleITK as sitk
 def pixel_accuracy(eval_segm, gt_segm):
     '''
     sum_i(n_ii) / sum_i(t_i)
@@ -46,61 +45,83 @@ def mean_IU(eval_segm, gt_segm):
     print("miou = %f" % mean_IU_)
     return mean_IU_
 
-def get_CCA(eval_segm, gt_segm):
-    #check_size(eval_segm, gt_segm)
-    #cl, n_cl = union_classes(eval_segm, gt_segm)
-    #eval_mask, gt_mask = extract_both_masks(eval_segm, gt_segm, cl, n_cl)
-    # 建立模型
-    cca = CCA(n_components=1)
-    #cca_2 = CCA(n_components=2)
-    # 训练数据
-    #print(eval_mask.shape)
-    #print(gt_mask.shape)
-    cca.fit(eval_segm, gt_segm)
-    #cca_2.fit(eval_mask, gt_mask)
-    # 降维操作
-    # print(X)
-    X_train_r, Y_train_r = cca.transform(eval_segm, gt_segm)
-    # print(X_train_r)
-    #print(np.corrcoef(X_train_r[:, 0], Y_train_r[:, 0])[0, 1])  # 输出相关系数
-    #print(np.corrcoef(X_train_r[:, 1], Y_train_r[:, 1])[0, 1])
-    CCA_=np.corrcoef(X_train_r[:, 0], Y_train_r[:, 0])[0, 1]
-    return CCA_
 
-def numeric_score(prediction, groundtruth):
-    """Computes scores:
-    FP = False Positives
-    FN = False Negatives
-    TP = True Positives
-    TN = True Negatives
-    return: FP, FN, TP, TN"""
+def convert_binary(mask):
+    h, w = mask.shape
+    mask_b = np.zeros((h, w))
+    for row in range(h):
+        for col in range(w):
+            if mask[row, col] != 2:
+                mask_b[row, col] = 0
+            else:
+                mask_b[row, col] = 2
+    return mask_b
 
-    FP = np.float(np.sum((prediction == 1) & (groundtruth == 0)))
-    FN = np.float(np.sum((prediction == 0) & (groundtruth == 1)))
-    TP = np.float(np.sum((prediction == 1) & (groundtruth == 1)))
-    TN = np.float(np.sum((prediction == 0) & (groundtruth == 0)))
+# General util function to get the boundary of a binary mask.
+def mask_to_boundary(mask, dilation_ratio=0.02):
     """
-    FP = np.float(matrix.sum(axis=0) - np.diag(matrix))
-    FN = np.float(matrix.sum(axis=1) - np.diag(matrix))
-    TP = np.float(np.diag(matrix))
-    TN = np.float(matrix.sum() - (FP + FN + TP))
+    Convert binary mask to boundary mask.
+    :param mask (numpy array, uint8): binary mask
+    :param dilation_ratio (float): ratio to calculate dilation = dilation_ratio * image_diagonal
+    :return: boundary mask (numpy array)
     """
-    return FP, FN, TP, TN
+    h, w = mask.shape
+    img_diag = np.sqrt(h ** 2 + w ** 2)
+    dilation = int(round(dilation_ratio * img_diag))
+    if dilation < 1:
+        dilation = 1
+    # Pad image so mask truncated by the image border is also considered as boundary.
+    new_mask = cv2.copyMakeBorder(mask, 1, 1, 1, 1, cv2.BORDER_CONSTANT, value=0)
+    kernel = np.ones((3, 3), dtype=np.uint8)
+    new_mask_erode = cv2.erode(new_mask, kernel, iterations=dilation)
+    mask_erode = new_mask_erode[1 : h + 1, 1 : w + 1]
+    # G_d intersects G in the paper.
+    return mask - mask_erode
 
-def accuracy_score(prediction, groundtruth):
-    """Getting the accuracy of the model"""
-    g = groundtruth == 1
-    g = np.array(g, bool)
-    p = prediction == 1
-    p = np.array(p, bool)
-    #cm=confusion_matrix(g,p)
-    #print(cm)
-    FP, FN, TP, TN = numeric_score(p,g)
-    N = FP + FN + TP + TN
-    accuracy = np.divide(TP, N+FP)
-    acc=accuracy * 100.0
-    print("cca = %f" % acc)
-    return acc
+
+def boundary_iou(gt, dt, dilation_ratio=0.02):
+    """
+    Compute boundary iou between two binary masks.
+    :param gt (numpy array, uint8): binary mask
+    :param dt (numpy array, uint8): binary mask
+    :param dilation_ratio (float): ratio to calculate dilation = dilation_ratio * image_diagonal
+    :return: boundary iou (float)
+    """
+    #gt_boundary = mask_to_boundary(gt, dilation_ratio)
+    #dt_boundary = mask_to_boundary(dt, dilation_ratio)
+    gt_boundary = convert_binary(gt)
+    dt_boundary = convert_binary(dt)
+    plt.figure()
+    plt.subplot(1, 2, 1)
+    plt.imshow(gt_boundary)
+    plt.subplot(1, 2, 2)
+    plt.imshow(dt_boundary)
+    plt.show()
+    intersection = ((gt_boundary * dt_boundary) > 0).sum()
+    union = ((gt_boundary + dt_boundary) > 0).sum()
+    boundary_iou = intersection / union
+    print('boundary_iou=%f'%boundary_iou)
+    return boundary_iou
+
+
+def computeQualityMeasures(pred, gt):
+    quality = dict()
+    lP=convert_binary(pred)
+    lT=convert_binary(gt)
+    labelPred = sitk.GetImageFromArray(lP, isVector=False)
+    labelTrue = sitk.GetImageFromArray(lT, isVector=False)
+    hausdorffcomputer = sitk.HausdorffDistanceImageFilter()
+    hausdorffcomputer.Execute(labelTrue > 0.5, labelPred > 0.5)
+    quality["avgHausdorff"] = hausdorffcomputer.GetAverageHausdorffDistance()
+    quality["Hausdorff"] = hausdorffcomputer.GetHausdorffDistance()
+
+    dicecomputer = sitk.LabelOverlapMeasuresImageFilter()
+    dicecomputer.Execute(labelTrue > 0.5, labelPred > 0.5)
+    quality["dice"] = dicecomputer.GetDiceCoefficient()
+    print('avgHausdorff=%f,Hausdorff=%f,dice=%f'%(quality["avgHausdorff"],quality["Hausdorff"],quality["dice"]))
+    return quality
+
+
 
 '''
 Auxiliary functions used during evaluation.
